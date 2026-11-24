@@ -6,7 +6,7 @@ import requests
 import streamlit as st
 from streamlit.errors import StreamlitSecretNotFoundError
 
-from ledger import as_of, milli, open_ledger, snapshot, sync_schwab, sync_ynab
+from ledger import ProviderError, list_ynab_plans, as_of, milli, open_ledger, snapshot, sync_schwab, sync_ynab
 
 st.set_page_config(page_title="Fairfax Finance")
 st.title("Fairfax Finance")
@@ -35,20 +35,30 @@ with closing(open_ledger(settings.get("database_path", "data/ledger.sqlite3"))) 
         ["Overview", "Accounts & valuations", "Connections", "Goal projection"]
     )
     with connections:
+        ynab = config.get("ynab", {})
+        if st.button("Find YNAB plans", disabled=not ynab.get("access_token")):
+            try:
+                plans = list_ynab_plans(ynab)
+                st.table([{"Plan": plan["name"], "plan_id": plan["id"]} for plan in plans])
+            except ProviderError as exc:
+                st.error(str(exc))
+            except (ValueError, KeyError, TypeError, requests.RequestException):
+                st.error("Could not load plans. Check your YNAB personal access token and retry.")
         for provider, sync, required in [
             ("YNAB", sync_ynab, ["plan_id", "access_token"]),
             ("Schwab", sync_schwab, ["access_token"]),
         ]:
             section = config.get(provider.lower(), {})
             configured = all(section.get(field) for field in required)
+            if provider == "Schwab":
+                configured = configured or all(section.get(k) for k in ("app_key", "app_secret", "refresh_token"))
             if st.button(f"Sync {provider}", disabled=not configured):
                 try:
                     sync(db, section, today.isoformat())
-                except ValueError as exc:
-                    if str(exc).startswith("Provider returned HTTP"):
-                        st.error(str(exc))
-                    else:
-                        st.error("Unexpected provider data. Sync rolled back.")
+                except ProviderError as exc:
+                    st.error(str(exc))
+                except ValueError:
+                    st.error("Unexpected provider data. Sync rolled back.")
                 except (requests.RequestException, KeyError, TypeError, ArithmeticError):
                     st.error("Sync failed. Check the connection and provider credentials.")
                 else:
