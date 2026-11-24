@@ -33,12 +33,33 @@ def snapshot(db, key, name, source, day, amount, included=True):
     db.execute("INSERT OR REPLACE INTO balances VALUES (?,?,?)", (key, day, amount))
 
 
+class ProviderError(ValueError):
+    def __init__(self, status, message):
+        self.status = status
+        super().__init__(message)
+
+
 def read_api(url, token):
+    token = token.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
     response = requests.get(url, headers={"Authorization": f"Bearer {token}"},
                             timeout=35, allow_redirects=False)
     if response.status_code != 200:
-        raise ValueError(f"Provider returned HTTP {response.status_code}. Check access and retry.")
+        status = response.status_code
+        if url.startswith("https://api.ynab.com/") and status == 404:
+            message = "YNAB 404: Use Find YNAB plans and copy the household plan ID into ynab.plan_id."
+        elif url.startswith("https://api.schwabapi.com/") and status == 401:
+            message = ("Schwab 401: Supply a current OAuth access token from Accounts and Trading, "
+                       "or configure app_key, app_secret and refresh_token to renew access.")
+        else:
+            message = f"Provider returned HTTP {status}. Check the connection settings."
+        raise ProviderError(status, message)
     return response.json()
+
+
+def list_ynab_plans(settings):
+    return read_api("https://api.ynab.com/v1/plans", settings["access_token"])["data"]["plans"]
 
 
 def sync_ynab(db, settings, day):
@@ -74,7 +95,29 @@ def sync_ynab(db, settings, day):
 
 
 def sync_schwab(db, settings, day):
-    accounts = read_api("https://api.schwabapi.com/trader/v1/accounts", settings["access_token"])
+    endpoint = "https://api.schwabapi.com/trader/v1/accounts"
+    token = settings.get("access_token", "").strip()
+    can_refresh = all(settings.get(key) for key in ("app_key", "app_secret", "refresh_token"))
+    if token:
+        try:
+            accounts = read_api(endpoint, token)
+        except ProviderError as exc:
+            if exc.status != 401 or not can_refresh:
+                raise
+            token = ""
+    if not token:
+        if not can_refresh:
+            raise ProviderError(401, "Schwab requires an OAuth access token or refresh credentials.")
+        response = requests.post(
+            "https://api.schwabapi.com/v1/oauth/token",
+            auth=(settings["app_key"].strip(), settings["app_secret"].strip()),
+            data={"grant_type": "refresh_token", "refresh_token": settings["refresh_token"].strip()},
+            timeout=35, allow_redirects=False,
+        )
+        if response.status_code != 200:
+            raise ProviderError(response.status_code, f"Schwab token renewal returned HTTP {response.status_code}. "
+                                "Check the app key and secret, then renew authorization if the refresh token expired.")
+        accounts = read_api(endpoint, response.json()["access_token"])
     with db:
         for entry in accounts:
             account = entry["securitiesAccount"]
