@@ -1,0 +1,15 @@
+.streamlit/*
+!.streamlit/secrets.example.toml
+secrets.toml
+.env*
+data/
+*.sqlite*
+*.db*
+*.csv
+*.ofx
+*.qfx
+*.pdf
+*.json
+*.xlsx
+__pycache__/
+.venv/
